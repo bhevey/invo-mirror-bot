@@ -91,6 +91,11 @@ class BinanceClient:
             logger.error(f"Binance POST {endpoint}: {e}")
             if e.response is not None:
                 logger.error(f"Body: {e.response.text}")
+                try:
+                    error_body = e.response.json()
+                    return {"error": True, "code": error_body.get("code"), "msg": error_body.get("msg")}
+                except Exception:
+                    pass
             return None
         except Exception as e:
             logger.error(f"Binance POST {endpoint}: {e}")

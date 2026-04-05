@@ -280,7 +280,35 @@ class InvoMirrorBot:
             if stop_order_id and "STOP_LOSS" not in close_reason:
                 self._cancel_stop_loss(binance_symbol, stop_order_id)
             result = self.binance.market_sell(binance_symbol, qty)
-            if result:
+            if result and result.get("error"):
+                error_code = result.get("code")
+                error_msg = result.get("msg", "Unknown error")
+                if error_code == -2010:
+                    logger.warning(
+                        f"Insufficient balance to sell {ticker} — closing position as unsellable. "
+                        f"Asset may have been sold manually or never purchased."
+                    )
+                    close_details["status"] = "SELL_FAILED_NO_BALANCE"
+                    close_details["error"] = error_msg
+                else:
+                    sell_failures = position.get("sell_failures", 0) + 1
+                    max_retries = 3
+                    if sell_failures >= max_retries:
+                        logger.error(
+                            f"Failed to sell {ticker} after {sell_failures} attempts "
+                            f"(error {error_code}: {error_msg}) — giving up"
+                        )
+                        close_details["status"] = f"SELL_FAILED_{error_code}"
+                        close_details["error"] = error_msg
+                    else:
+                        logger.error(
+                            f"Failed to sell {ticker} (error {error_code}: {error_msg}) — "
+                            f"will retry ({sell_failures}/{max_retries})"
+                        )
+                        position["sell_failures"] = sell_failures
+                        self.state._save()
+                        return False
+            elif result:
                 filled_value = float(result.get("cummulativeQuoteQty", 0))
                 cost = position.get("binance_total_cost", 0)
                 pnl = filled_value - cost
@@ -289,8 +317,16 @@ class InvoMirrorBot:
                 close_details["pnl"] = pnl
                 close_details["status"] = "SOLD"
             else:
-                logger.error(f"Failed to sell {ticker}")
-                return False
+                sell_failures = position.get("sell_failures", 0) + 1
+                max_retries = 3
+                if sell_failures >= max_retries:
+                    logger.error(f"Failed to sell {ticker} after {sell_failures} attempts — giving up")
+                    close_details["status"] = "SELL_FAILED_UNKNOWN"
+                else:
+                    logger.error(f"Failed to sell {ticker} — will retry ({sell_failures}/{max_retries})")
+                    position["sell_failures"] = sell_failures
+                    self.state._save()
+                    return False
         else:
             current_price = signal.get("current_price") or signal.get("closing_price") or 0
             if current_price <= 0:
@@ -303,10 +339,14 @@ class InvoMirrorBot:
             close_details["status"] = "PAPER_SOLD"
 
         self.state.record_close(invo_id, close_details)
-        logger.info(
-            f"{'[PAPER] ' if self.mode == 'paper' else ''}"
-            f"SELL {ticker} — PnL: ${close_details.get('pnl', 0):.2f} — {close_reason}"
-        )
+        status = close_details.get("status", "")
+        if status.startswith("SELL_FAILED"):
+            logger.warning(f"CLOSED {ticker} with status {status} — {close_reason}")
+        else:
+            logger.info(
+                f"{'[PAPER] ' if self.mode == 'paper' else ''}"
+                f"SELL {ticker} — PnL: ${close_details.get('pnl', 0):.2f} — {close_reason}"
+            )
         return True
 
     def poll_portfolio(self, portfolio_config: dict):

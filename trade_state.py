@@ -110,12 +110,14 @@ class TradeState:
             "closed_at": datetime.now(timezone.utc).isoformat(),
         }
 
+        status = close_details.get("status", "")
         pnl = close_details.get("pnl", 0)
-        self.state["stats"]["total_pnl"] += pnl
-        if pnl > 0:
-            self.state["stats"]["wins"] += 1
-        else:
-            self.state["stats"]["losses"] += 1
+        if not status.startswith("SELL_FAILED"):
+            self.state["stats"]["total_pnl"] += pnl
+            if pnl > 0:
+                self.state["stats"]["wins"] += 1
+            else:
+                self.state["stats"]["losses"] += 1
 
         self.state["closed_positions"].append(closed_trade)
         self._save()

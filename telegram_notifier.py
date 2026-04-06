@@ -19,7 +19,9 @@ class TelegramNotifier:
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.enabled = bool(bot_token and chat_id)
-        if not self.enabled:
+        if self.enabled:
+            logger.info(f"Telegram notifications enabled (chat_id: {chat_id})")
+        else:
             logger.info("Telegram notifications disabled (no token/chat_id)")
 
     def send(self, message: str) -> bool:
@@ -79,4 +81,8 @@ class TelegramNotifier:
                 cost = pos.get("cost", 0)
                 lines.append(f"  {emoji} {ticker}: {sign}{change_pct:.1f}% (${cost:.2f})")
 
-        return self.send("\n".join(lines))
+        message = "\n".join(lines)
+        result = self.send(message)
+        if not result:
+            logger.error("Failed to send wallet update via Telegram")
+        return result

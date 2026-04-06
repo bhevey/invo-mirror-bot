@@ -633,6 +633,7 @@ class InvoMirrorBot:
     def _send_telegram_update(self):
         """Send a wallet position update via Telegram."""
         if not self.telegram.enabled:
+            logger.debug("Telegram not enabled, skipping notification")
             return
 
         wallet_value = None
@@ -640,6 +641,7 @@ class InvoMirrorBot:
             wallet_value = self.binance.get_total_wallet_value()
 
         if wallet_value is None:
+            logger.warning("Could not fetch wallet value for Telegram notification")
             return
 
         aud_rate = _get_usdt_aud_rate()

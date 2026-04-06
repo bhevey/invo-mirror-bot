@@ -56,6 +56,10 @@ WATCHED_PORTFOLIOS = [
 BINANCE_API_KEY = "uX4ySFCwA1iem34hcP8l1kQibkbvaL7IXczYedkOmqYazTYHAIkusEKxGzNAA1s1"
 BINANCE_API_SECRET = "ZanES0ZbuwT8Rlg6OgxgJhEgo9ILEFah2Q0YAcEyMzbj36fGPyNCjhVetV1Wm1dO"
 
+# ── Wallet Tracking ──
+# Starting USDT balance for overall P&L tracking
+STARTING_BALANCE_USDT = 137.41273787
+
 # ── Trading Configuration ──
 # How much of your available balance to use per trade (as a decimal)
 # 0.05 = 5% of available balance per trade

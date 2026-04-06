@@ -132,6 +132,28 @@ class BinanceClient:
                     return float(b["free"])
         return 0.0
 
+    def get_total_wallet_value(self) -> Optional[float]:
+        """Calculate total wallet value in USDT (free + locked for all assets)."""
+        account = self.get_account()
+        if not account:
+            return None
+        total = 0.0
+        for b in account.get("balances", []):
+            free = float(b["free"])
+            locked = float(b["locked"])
+            amount = free + locked
+            if amount <= 0:
+                continue
+            asset = b["asset"]
+            if asset == "USDT":
+                total += amount
+            else:
+                symbol = f"{asset}USDT"
+                price = self.get_price(symbol)
+                if price:
+                    total += amount * price
+        return total
+
     def get_price(self, symbol: str) -> Optional[float]:
         data = self._get("/api/v3/ticker/price", {"symbol": symbol})
         return float(data["price"]) if data else None

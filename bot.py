@@ -396,6 +396,21 @@ class InvoMirrorBot:
 
         logger.info("=" * 60)
         logger.info(f"InvoMirror Status — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+
+        # Wallet position
+        if self.mode == "live":
+            wallet_value = self.binance.get_total_wallet_value()
+            if wallet_value is not None:
+                starting = config.STARTING_BALANCE_USDT
+                wallet_pnl = wallet_value - starting
+                wallet_pct = ((wallet_value - starting) / starting) * 100
+                logger.info(
+                    f"WALLET: ${wallet_value:.2f} USDT | "
+                    f"Started: ${starting:.2f} | "
+                    f"P&L: {'+'if wallet_pnl >= 0 else ''}${wallet_pnl:.2f} "
+                    f"({'+'if wallet_pct >= 0 else ''}{wallet_pct:.1f}%)"
+                )
+
         logger.info(f"Mode: {self.mode.upper()} | SL: {self.stop_loss_pct*100:.0f}% | Poll: {self.poll_interval}s")
         logger.info(f"Watching: {len(enabled_portfolios)} trader(s)")
         for p in enabled_portfolios:

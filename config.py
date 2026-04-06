@@ -114,3 +114,7 @@ LOG_LEVEL = "INFO"
 # Set to None to disable
 TELEGRAM_BOT_TOKEN = None
 TELEGRAM_CHAT_ID = None
+
+# How often to send Telegram wallet updates (in seconds)
+# 21600 = 6 hours
+TELEGRAM_NOTIFY_INTERVAL = 21600

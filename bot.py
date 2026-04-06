@@ -26,6 +26,7 @@ import config
 from invo_client import InvoClient
 from binance_client import BinanceClient
 from trade_state import TradeState
+from telegram_notifier import TelegramNotifier
 
 # ── Logging Setup ──
 logging.basicConfig(
@@ -96,6 +97,14 @@ class InvoMirrorBot:
         self.running = True
         self.stop_loss_pct = getattr(config, "STOP_LOSS_PCT", 0.15)
         self.poll_interval = getattr(config, "POLL_INTERVAL", 15)
+
+        # Telegram notifications
+        self.telegram = TelegramNotifier(
+            getattr(config, "TELEGRAM_BOT_TOKEN", None),
+            getattr(config, "TELEGRAM_CHAT_ID", None),
+        )
+        self.notify_interval = getattr(config, "TELEGRAM_NOTIFY_INTERVAL", 21600)
+        self.last_notify_time = 0
 
         logger.info(f"InvoMirror Bot initialized in {self.mode.upper()} mode")
         logger.info(f"Stop-loss: {self.stop_loss_pct * 100:.0f}%")
@@ -621,6 +630,41 @@ class InvoMirrorBot:
                     )
         logger.info("=" * 60)
 
+    def _send_telegram_update(self):
+        """Send a wallet position update via Telegram."""
+        if not self.telegram.enabled:
+            logger.debug("Telegram not enabled, skipping notification")
+            return
+
+        wallet_value = None
+        if self.mode == "live" and self.binance:
+            wallet_value = self.binance.get_total_wallet_value()
+
+        if wallet_value is None:
+            logger.warning("Could not fetch wallet value for Telegram notification")
+            return
+
+        aud_rate = _get_usdt_aud_rate()
+        aud_value = wallet_value * aud_rate if aud_rate else None
+        starting = config.STARTING_BALANCE_USDT
+        stats = self.state.get_stats()
+
+        # Build position list with current P&L
+        positions = []
+        for invo_id, pos in self.state.get_open_positions().items():
+            buy_price = pos.get("binance_avg_price", 0)
+            binance_symbol = pos.get("binance_symbol", "")
+            current_price = self._get_current_price(binance_symbol) if binance_symbol else 0
+            change_pct = ((current_price - buy_price) / buy_price * 100) if buy_price > 0 and current_price > 0 else 0
+            positions.append({
+                "ticker": pos.get("ticker", "?"),
+                "change_pct": change_pct,
+                "cost": pos.get("binance_total_cost", 0),
+            })
+
+        self.telegram.send_wallet_update(wallet_value, aud_value, starting, stats, positions)
+        logger.info("Sent Telegram wallet update")
+
     def run(self):
         """Main bot loop."""
         logger.info("Starting InvoMirror Bot...")
@@ -657,6 +701,12 @@ class InvoMirrorBot:
                 poll_count += 1
                 if poll_count % 20 == 0:  # Status every ~5 min at 15s intervals
                     self.print_status()
+
+                # Scheduled Telegram notification
+                now = time.time()
+                if self.telegram.enabled and (now - self.last_notify_time) >= self.notify_interval:
+                    self._send_telegram_update()
+                    self.last_notify_time = now
 
                 time.sleep(self.poll_interval)
 

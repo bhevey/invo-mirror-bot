@@ -19,6 +19,7 @@ import sys
 import time
 import logging
 import argparse
+import requests
 from datetime import datetime, timezone
 
 import config
@@ -42,6 +43,20 @@ logger = logging.getLogger("invo_mirror")
 _GREEN = "\033[92m"
 _RED = "\033[91m"
 _RESET = "\033[0m"
+
+
+def _get_usdt_aud_rate() -> float | None:
+    """Fetch current USDT to AUD exchange rate from CoinGecko."""
+    try:
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "tether", "vs_currencies": "aud"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get("tether", {}).get("aud")
+    except Exception:
+        return None
 
 
 def _color_pnl(text: str, value: float) -> str:
@@ -420,8 +435,10 @@ class InvoMirrorBot:
                 wallet_pnl = wallet_value - starting
                 wallet_pct = ((wallet_value - starting) / starting) * 100
                 pnl_str = f"{'+'if wallet_pnl >= 0 else ''}${wallet_pnl:.2f} ({'+'if wallet_pct >= 0 else ''}{wallet_pct:.1f}%)"
+                aud_rate = _get_usdt_aud_rate()
+                aud_part = f" | A${wallet_value * aud_rate:.2f} AUD" if aud_rate else ""
                 logger.info(
-                    f"WALLET: ${wallet_value:.2f} USDT | "
+                    f"WALLET: ${wallet_value:.2f} USDT{aud_part} | "
                     f"Started: ${starting:.2f} | "
                     f"P&L: {_color_pnl(pnl_str, wallet_pnl)}"
                 )

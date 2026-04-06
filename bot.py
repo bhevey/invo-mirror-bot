@@ -133,7 +133,7 @@ class InvoMirrorBot:
             max_mult = getattr(config, "MAX_LEVERAGE_MULTIPLIER", 10)
             multiplier = min(leverage, max_mult)
             amount *= multiplier
-            logger.info(f"Leverage scaling: {multiplier}x → ${amount:.2f} USDT")
+            logger.info(f"Leverage scaling: {multiplier}x -> ${amount:.2f} USDT")
 
         amount = max(amount, config.MIN_TRADE_AMOUNT_USDT)
         amount = min(amount, config.MAX_TRADE_AMOUNT_USDT)
@@ -198,7 +198,7 @@ class InvoMirrorBot:
                 filled_value = float(status.get("cummulativeQuoteQty", 0))
                 cost = pos.get("binance_total_cost", 0)
                 pnl = filled_value - cost
-                logger.warning(f"STOP-LOSS FILLED: {pos['ticker']} — PnL: ${pnl:.2f}")
+                logger.warning(f"STOP-LOSS FILLED: {pos['ticker']} -- PnL: ${pnl:.2f}")
                 self.state.record_close(invo_id, {
                     "binance_sell_value": filled_value,
                     "pnl": pnl,
@@ -301,9 +301,9 @@ class InvoMirrorBot:
         self.state.record_open(signal["id"], trade_record)
         logger.info(
             f"{'[PAPER] ' if self.mode == 'paper' else ''}"
-            f"BUY {ticker} ({binance_symbol}) — "
-            f"${trade_record.get('binance_total_cost', amount):.2f} USDT — "
-            f"SL: ${trade_record.get('stop_loss_price', 0):.4f} — "
+            f"BUY {ticker} ({binance_symbol}) -- "
+            f"${trade_record.get('binance_total_cost', amount):.2f} USDT -- "
+            f"SL: ${trade_record.get('stop_loss_price', 0):.4f} -- "
             f"Mirroring {signal.get('owner_username', '?')}"
         )
         return True
@@ -327,8 +327,8 @@ class InvoMirrorBot:
         additional_usdt = min(additional_usdt, config.MAX_TRADE_AMOUNT_USDT)
 
         logger.info(
-            f"POSITION INCREASE: {ticker} {old_pct:.2f}% → {new_pct:.2f}% "
-            f"(+{increase_ratio*100:.1f}%) — buying ${additional_usdt:.2f} more"
+            f"POSITION INCREASE: {ticker} {old_pct:.2f}% -> {new_pct:.2f}% "
+            f"(+{increase_ratio*100:.1f}%) -- buying ${additional_usdt:.2f} more"
         )
 
         if self.mode == "live":
@@ -358,7 +358,7 @@ class InvoMirrorBot:
 
                 self.state._save()
                 logger.info(
-                    f"INCREASED {ticker}: +{new_qty} units (${new_value:.2f}) — "
+                    f"INCREASED {ticker}: +{new_qty} units (${new_value:.2f}) -- "
                     f"Total: {total_qty} units (${total_cost:.2f})"
                 )
                 return True
@@ -390,9 +390,20 @@ class InvoMirrorBot:
         if sell_qty <= 0:
             return False
 
+        # Check if the sell value is worth executing
+        current_price = self._get_current_price(binance_symbol)
+        sell_value_usdt = sell_qty * current_price if current_price > 0 else 0
+        if sell_value_usdt < config.MIN_TRADE_AMOUNT_USDT:
+            logger.info(
+                f"Position decrease for {ticker} too small (${sell_value_usdt:.2f}), skipping"
+            )
+            position["invo_position_size_pct"] = new_pct
+            self.state._save()
+            return False
+
         logger.info(
-            f"POSITION DECREASE: {ticker} {old_pct:.2f}% → {new_pct:.2f}% "
-            f"(-{decrease_ratio*100:.1f}%) — selling {sell_qty:.6f} units"
+            f"POSITION DECREASE: {ticker} {old_pct:.2f}% -> {new_pct:.2f}% "
+            f"(-{decrease_ratio*100:.1f}%) -- selling {sell_qty:.6f} units"
         )
 
         if self.mode == "live":
@@ -422,7 +433,7 @@ class InvoMirrorBot:
                 pnl = sold_value - cost_sold
                 logger.info(
                     f"DECREASED {ticker}: -{sold_qty} units (${sold_value:.2f}, "
-                    f"PnL: {_color_pnl(f'${pnl:.2f}', pnl)}) — "
+                    f"PnL: {_color_pnl(f'${pnl:.2f}', pnl)}) -- "
                     f"Remaining: {remaining_qty} units (${remaining_cost:.2f})"
                 )
                 return True
@@ -466,7 +477,7 @@ class InvoMirrorBot:
                 error_msg = result.get("msg", "Unknown error")
                 if error_code == -2010:
                     logger.warning(
-                        f"Insufficient balance to sell {ticker} — closing position as unsellable. "
+                        f"Insufficient balance to sell {ticker} -- closing position as unsellable. "
                         f"Asset may have been sold manually or never purchased."
                     )
                     close_details["status"] = "SELL_FAILED_NO_BALANCE"
@@ -477,13 +488,13 @@ class InvoMirrorBot:
                     if sell_failures >= max_retries:
                         logger.error(
                             f"Failed to sell {ticker} after {sell_failures} attempts "
-                            f"(error {error_code}: {error_msg}) — giving up"
+                            f"(error {error_code}: {error_msg}) -- giving up"
                         )
                         close_details["status"] = f"SELL_FAILED_{error_code}"
                         close_details["error"] = error_msg
                     else:
                         logger.error(
-                            f"Failed to sell {ticker} (error {error_code}: {error_msg}) — "
+                            f"Failed to sell {ticker} (error {error_code}: {error_msg}) -- "
                             f"will retry ({sell_failures}/{max_retries})"
                         )
                         position["sell_failures"] = sell_failures
@@ -501,10 +512,10 @@ class InvoMirrorBot:
                 sell_failures = position.get("sell_failures", 0) + 1
                 max_retries = 3
                 if sell_failures >= max_retries:
-                    logger.error(f"Failed to sell {ticker} after {sell_failures} attempts — giving up")
+                    logger.error(f"Failed to sell {ticker} after {sell_failures} attempts -- giving up")
                     close_details["status"] = "SELL_FAILED_UNKNOWN"
                 else:
-                    logger.error(f"Failed to sell {ticker} — will retry ({sell_failures}/{max_retries})")
+                    logger.error(f"Failed to sell {ticker} -- will retry ({sell_failures}/{max_retries})")
                     position["sell_failures"] = sell_failures
                     self.state._save()
                     return False
@@ -522,11 +533,11 @@ class InvoMirrorBot:
         self.state.record_close(invo_id, close_details)
         status = close_details.get("status", "")
         if status.startswith("SELL_FAILED"):
-            logger.warning(f"CLOSED {ticker} with status {status} — {close_reason}")
+            logger.warning(f"CLOSED {ticker} with status {status} -- {close_reason}")
         else:
             logger.info(
                 f"{'[PAPER] ' if self.mode == 'paper' else ''}"
-                f"SELL {ticker} — PnL: ${close_details.get('pnl', 0):.2f} — {close_reason}"
+                f"SELL {ticker} -- PnL: ${close_details.get('pnl', 0):.2f} -- {close_reason}"
             )
         return True
 
@@ -562,7 +573,10 @@ class InvoMirrorBot:
                 if position:
                     old_pct = position.get("invo_position_size_pct", 0)
                     new_pct = parsed.get("position_size_pct", 0)
-                    if old_pct > 0 and new_pct > 0 and abs(new_pct - old_pct) / old_pct > 0.05:
+                    # Require both a meaningful absolute change (>0.5%) and relative change (>10%)
+                    abs_change = abs(new_pct - old_pct)
+                    rel_change = abs_change / old_pct if old_pct > 0 else 0
+                    if old_pct > 0 and new_pct > 0 and abs_change >= 0.5 and rel_change > 0.10:
                         if new_pct > old_pct:
                             self._execute_position_increase(parsed["id"], position, old_pct, new_pct)
                         else:
@@ -587,7 +601,7 @@ class InvoMirrorBot:
         enabled_portfolios = [p for p in config.WATCHED_PORTFOLIOS if p.get("enabled", True)]
 
         logger.info("=" * 60)
-        logger.info(f"InvoMirror Status — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+        logger.info(f"InvoMirror Status -- {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
         # Wallet position
         if self.mode == "live":

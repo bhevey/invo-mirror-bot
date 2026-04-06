@@ -102,24 +102,32 @@ class InvoMirrorBot:
         logger.info(f"Poll interval: {self.poll_interval}s")
         logger.info(f"Max positions: {config.MAX_OPEN_POSITIONS}")
 
-    def _calculate_trade_amount(self) -> float:
-        """Calculate how much USDT to spend on a trade."""
-        if self.mode == "paper":
-            paper_balance = getattr(config, "PAPER_BALANCE", 200.0)
-            amount = paper_balance * config.TRADE_ALLOCATION_PCT
-            amount = max(amount, config.MIN_TRADE_AMOUNT_USDT)
-            amount = min(amount, config.MAX_TRADE_AMOUNT_USDT)
-            return amount
+    def _calculate_trade_amount(self, leverage: int = 1) -> float:
+        """Calculate how much USDT to spend on a trade.
 
-        balance = self.binance.get_usdt_balance()
+        If LEVERAGE_SCALING is enabled, the base amount is multiplied by the
+        trader's leverage (capped by MAX_LEVERAGE_MULTIPLIER) to approximate
+        their risk exposure on spot.
+        """
+        if self.mode == "paper":
+            balance = getattr(config, "PAPER_BALANCE", 200.0)
+        else:
+            balance = self.binance.get_usdt_balance()
+            if balance < config.MIN_TRADE_AMOUNT_USDT:
+                logger.warning(f"Insufficient USDT balance: ${balance:.2f}")
+                return 0
+
         amount = balance * config.TRADE_ALLOCATION_PCT
+
+        # Scale by leverage if enabled
+        if getattr(config, "LEVERAGE_SCALING", False) and leverage > 1:
+            max_mult = getattr(config, "MAX_LEVERAGE_MULTIPLIER", 10)
+            multiplier = min(leverage, max_mult)
+            amount *= multiplier
+            logger.info(f"Leverage scaling: {multiplier}x → ${amount:.2f} USDT")
+
         amount = max(amount, config.MIN_TRADE_AMOUNT_USDT)
         amount = min(amount, config.MAX_TRADE_AMOUNT_USDT)
-
-        if balance < config.MIN_TRADE_AMOUNT_USDT:
-            logger.warning(f"Insufficient USDT balance: ${balance:.2f}")
-            return 0
-
         return amount
 
     def _get_current_price(self, binance_symbol: str) -> float:
@@ -230,7 +238,8 @@ class InvoMirrorBot:
             logger.warning(f"Max positions ({config.MAX_OPEN_POSITIONS}) reached, skipping {ticker}")
             return False
 
-        amount = self._calculate_trade_amount()
+        leverage = signal.get("leverage", 1) or 1
+        amount = self._calculate_trade_amount(leverage=leverage)
         if amount <= 0:
             return False
 
@@ -242,7 +251,8 @@ class InvoMirrorBot:
             "invo_entry_price": signal["entry_price"],
             "invo_take_profit": signal["take_profit"],
             "invo_stop_loss": signal["stop_loss"],
-            "invo_leverage": signal["leverage"],
+            "invo_leverage": leverage,
+            "invo_position_size_pct": signal.get("position_size_pct", 0),
             "invo_owner": signal["owner_username"],
             "invo_portfolio_id": signal["portfolio_id"],
             "intended_amount_usdt": amount,
@@ -288,6 +298,138 @@ class InvoMirrorBot:
             f"Mirroring {signal.get('owner_username', '?')}"
         )
         return True
+
+    def _execute_position_increase(self, invo_id: str, position: dict, old_pct: float, new_pct: float) -> bool:
+        """Buy more of an asset when the trader increases their position size."""
+        ticker = position["ticker"]
+        binance_symbol = position["binance_symbol"]
+        increase_ratio = (new_pct - old_pct) / old_pct if old_pct > 0 else 1.0
+        current_cost = position.get("binance_total_cost", 0)
+        additional_usdt = current_cost * increase_ratio
+
+        if additional_usdt < config.MIN_TRADE_AMOUNT_USDT:
+            logger.info(
+                f"Position increase for {ticker} too small (${additional_usdt:.2f}), skipping"
+            )
+            position["invo_position_size_pct"] = new_pct
+            self.state._save()
+            return False
+
+        additional_usdt = min(additional_usdt, config.MAX_TRADE_AMOUNT_USDT)
+
+        logger.info(
+            f"POSITION INCREASE: {ticker} {old_pct:.2f}% → {new_pct:.2f}% "
+            f"(+{increase_ratio*100:.1f}%) — buying ${additional_usdt:.2f} more"
+        )
+
+        if self.mode == "live":
+            result = self.binance.market_buy(binance_symbol, additional_usdt)
+            if result:
+                new_qty = float(result.get("executedQty", 0))
+                new_value = float(result.get("cummulativeQuoteQty", 0))
+                old_qty = position.get("binance_qty", 0)
+                old_cost = position.get("binance_total_cost", 0)
+                total_qty = old_qty + new_qty
+                total_cost = old_cost + new_value
+                avg_price = total_cost / total_qty if total_qty > 0 else 0
+
+                position["binance_qty"] = total_qty
+                position["binance_avg_price"] = avg_price
+                position["binance_total_cost"] = total_cost
+                position["invo_position_size_pct"] = new_pct
+
+                # Update stop-loss for the new total quantity
+                old_stop_id = position.get("stop_loss_order_id")
+                if old_stop_id:
+                    self._cancel_stop_loss(binance_symbol, old_stop_id)
+                new_stop_id = self._place_native_stop_loss(binance_symbol, total_qty, avg_price)
+                if new_stop_id:
+                    position["stop_loss_order_id"] = new_stop_id
+                position["stop_loss_price"] = avg_price * (1 - self.stop_loss_pct)
+
+                self.state._save()
+                logger.info(
+                    f"INCREASED {ticker}: +{new_qty} units (${new_value:.2f}) — "
+                    f"Total: {total_qty} units (${total_cost:.2f})"
+                )
+                return True
+            else:
+                logger.error(f"Failed to increase position for {ticker}")
+                return False
+        else:
+            price = self._get_current_price(binance_symbol)
+            new_qty = additional_usdt / price if price > 0 else 0
+            old_qty = position.get("binance_qty", 0)
+            old_cost = position.get("binance_total_cost", 0)
+            position["binance_qty"] = old_qty + new_qty
+            position["binance_total_cost"] = old_cost + additional_usdt
+            position["binance_avg_price"] = (old_cost + additional_usdt) / (old_qty + new_qty) if (old_qty + new_qty) > 0 else 0
+            position["invo_position_size_pct"] = new_pct
+            position["stop_loss_price"] = position["binance_avg_price"] * (1 - self.stop_loss_pct)
+            self.state._save()
+            logger.info(f"[PAPER] INCREASED {ticker}: +${additional_usdt:.2f}")
+            return True
+
+    def _execute_position_decrease(self, invo_id: str, position: dict, old_pct: float, new_pct: float) -> bool:
+        """Sell part of an asset when the trader decreases their position size."""
+        ticker = position["ticker"]
+        binance_symbol = position["binance_symbol"]
+        decrease_ratio = (old_pct - new_pct) / old_pct if old_pct > 0 else 0
+        total_qty = position.get("binance_qty", 0)
+        sell_qty = total_qty * decrease_ratio
+
+        if sell_qty <= 0:
+            return False
+
+        logger.info(
+            f"POSITION DECREASE: {ticker} {old_pct:.2f}% → {new_pct:.2f}% "
+            f"(-{decrease_ratio*100:.1f}%) — selling {sell_qty:.6f} units"
+        )
+
+        if self.mode == "live":
+            result = self.binance.market_sell(binance_symbol, sell_qty)
+            if result and not result.get("error"):
+                sold_qty = float(result.get("executedQty", 0))
+                sold_value = float(result.get("cummulativeQuoteQty", 0))
+                remaining_qty = total_qty - sold_qty
+                cost_sold = position.get("binance_total_cost", 0) * (sold_qty / total_qty) if total_qty > 0 else 0
+                remaining_cost = position.get("binance_total_cost", 0) - cost_sold
+
+                position["binance_qty"] = remaining_qty
+                position["binance_total_cost"] = remaining_cost
+                position["invo_position_size_pct"] = new_pct
+
+                # Update stop-loss for the reduced quantity
+                old_stop_id = position.get("stop_loss_order_id")
+                if old_stop_id:
+                    self._cancel_stop_loss(binance_symbol, old_stop_id)
+                if remaining_qty > 0:
+                    avg_price = position.get("binance_avg_price", 0)
+                    new_stop_id = self._place_native_stop_loss(binance_symbol, remaining_qty, avg_price)
+                    if new_stop_id:
+                        position["stop_loss_order_id"] = new_stop_id
+
+                self.state._save()
+                pnl = sold_value - cost_sold
+                logger.info(
+                    f"DECREASED {ticker}: -{sold_qty} units (${sold_value:.2f}, "
+                    f"PnL: {_color_pnl(f'${pnl:.2f}', pnl)}) — "
+                    f"Remaining: {remaining_qty} units (${remaining_cost:.2f})"
+                )
+                return True
+            else:
+                logger.error(f"Failed to decrease position for {ticker}")
+                return False
+        else:
+            price = self._get_current_price(binance_symbol)
+            sold_value = sell_qty * price if price > 0 else 0
+            cost_sold = position.get("binance_total_cost", 0) * decrease_ratio
+            position["binance_qty"] = total_qty - sell_qty
+            position["binance_total_cost"] = position.get("binance_total_cost", 0) - cost_sold
+            position["invo_position_size_pct"] = new_pct
+            self.state._save()
+            logger.info(f"[PAPER] DECREASED {ticker}: -${sold_value:.2f}")
+            return True
 
     def _execute_sell(self, invo_id: str, signal: dict) -> bool:
         """Execute a sell order."""
@@ -405,6 +547,17 @@ class InvoMirrorBot:
                     f"{parsed['direction']} {parsed['ticker']} @ ${parsed['entry_price']}"
                 )
                 self._execute_buy(parsed)
+            else:
+                # Check for position size changes on existing open positions
+                position = self.state.get_open_position(parsed["id"])
+                if position:
+                    old_pct = position.get("invo_position_size_pct", 0)
+                    new_pct = parsed.get("position_size_pct", 0)
+                    if old_pct > 0 and new_pct > 0 and abs(new_pct - old_pct) / old_pct > 0.05:
+                        if new_pct > old_pct:
+                            self._execute_position_increase(parsed["id"], position, old_pct, new_pct)
+                        else:
+                            self._execute_position_decrease(parsed["id"], position, old_pct, new_pct)
 
         # Clean up skipped IDs for positions that are no longer active
         self.state.clean_skipped(current_invo_ids)

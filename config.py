@@ -74,8 +74,13 @@ MIN_TRADE_AMOUNT_USDT = 10.0
 # Only mirror LONG/BUY trades (True for Australian spot-only)
 LONG_ONLY = True
 
-# Ignore leverage from Invo (we trade spot on Binance)
-IGNORE_LEVERAGE = True
+# Scale trade amount by trader's leverage (spot approximation)
+# If True: a 5X trade gets 5x the base allocation (capped by MAX_TRADE_AMOUNT_USDT)
+# If False: leverage is ignored, all trades use base allocation
+LEVERAGE_SCALING = True
+
+# Maximum leverage multiplier to apply (safety cap)
+MAX_LEVERAGE_MULTIPLIER = 10
 
 # ── Stop-Loss Configuration ──
 # Auto-sell if a position drops this % from buy price

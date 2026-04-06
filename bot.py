@@ -38,6 +38,21 @@ logging.basicConfig(
 logger = logging.getLogger("invo_mirror")
 
 
+# ANSI color codes for terminal output
+_GREEN = "\033[92m"
+_RED = "\033[91m"
+_RESET = "\033[0m"
+
+
+def _color_pnl(text: str, value: float) -> str:
+    """Color text green if positive, red if negative."""
+    if value > 0:
+        return f"{_GREEN}{text}{_RESET}"
+    elif value < 0:
+        return f"{_RED}{text}{_RESET}"
+    return text
+
+
 def _normalize_id(value) -> str:
     """Normalize a portfolio/investment ID for comparison.
 
@@ -396,12 +411,29 @@ class InvoMirrorBot:
 
         logger.info("=" * 60)
         logger.info(f"InvoMirror Status — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+
+        # Wallet position
+        if self.mode == "live":
+            wallet_value = self.binance.get_total_wallet_value()
+            if wallet_value is not None:
+                starting = config.STARTING_BALANCE_USDT
+                wallet_pnl = wallet_value - starting
+                wallet_pct = ((wallet_value - starting) / starting) * 100
+                pnl_str = f"{'+'if wallet_pnl >= 0 else ''}${wallet_pnl:.2f} ({'+'if wallet_pct >= 0 else ''}{wallet_pct:.1f}%)"
+                logger.info(
+                    f"WALLET: ${wallet_value:.2f} USDT | "
+                    f"Started: ${starting:.2f} | "
+                    f"P&L: {_color_pnl(pnl_str, wallet_pnl)}"
+                )
+
         logger.info(f"Mode: {self.mode.upper()} | SL: {self.stop_loss_pct*100:.0f}% | Poll: {self.poll_interval}s")
         logger.info(f"Watching: {len(enabled_portfolios)} trader(s)")
         for p in enabled_portfolios:
             logger.info(f"  - {p['name']}")
+        trade_pnl = stats['total_pnl']
+        trade_pnl_str = f"${trade_pnl:.2f}"
         logger.info(f"Open: {stats['open_count']} | Closed: {stats['closed_count']} | "
-                     f"Win rate: {stats['win_rate']:.1f}% | PnL: ${stats['total_pnl']:.2f}")
+                     f"Win rate: {stats['win_rate']:.1f}% | PnL: {_color_pnl(trade_pnl_str, trade_pnl)}")
 
         if open_positions:
             for invo_id, pos in open_positions.items():
@@ -411,9 +443,10 @@ class InvoMirrorBot:
                 current_price = self._get_current_price(binance_symbol) if binance_symbol else 0
                 if buy_price > 0 and current_price > 0:
                     change_pct = ((current_price - buy_price) / buy_price) * 100
+                    pct_str = f"{'+'if change_pct >= 0 else ''}{change_pct:.1f}%"
                     logger.info(
                         f"  {pos['ticker']}: ${pos.get('binance_total_cost', 0):.2f} "
-                        f"(now: {'+'if change_pct >= 0 else ''}{change_pct:.1f}%, "
+                        f"(now: {_color_pnl(pct_str, change_pct)}, "
                         f"SL: ${sl_price:.2f}) via {pos.get('invo_owner', '?')}"
                     )
         logger.info("=" * 60)

@@ -541,6 +541,59 @@ class InvoMirrorBot:
             )
         return True
 
+    def _merge_replaced_position(self, old_invo_id: str, old_pos: dict,
+                                  new_invo_id: str, new_signal: dict,
+                                  portfolio_name: str):
+        """Merge an old position into a new one when a trader replaces a trade on the same coin.
+
+        Instead of selling the old position and buying a new one (incurring fees
+        and slippage), we keep the existing Binance-side position and just update
+        the tracking to point at the new Invo investment ID.
+        """
+        ticker = old_pos["ticker"]
+        binance_symbol = old_pos["binance_symbol"]
+        logger.info(
+            f"MERGE: {ticker} replaced by {portfolio_name} -- "
+            f"keeping existing position (old invo_id: {old_invo_id[:8]}..., "
+            f"new invo_id: {new_invo_id[:8]}...)"
+        )
+
+        # Build new position record, preserving Binance-side data from old position
+        new_record = {
+            "ticker": ticker,
+            "binance_symbol": binance_symbol,
+            "binance_asset": old_pos.get("binance_asset", ticker.upper()),
+            "direction": new_signal.get("direction", old_pos.get("direction")),
+            "invo_entry_price": new_signal.get("entry_price"),
+            "invo_take_profit": new_signal.get("take_profit"),
+            "invo_stop_loss": new_signal.get("stop_loss"),
+            "invo_leverage": new_signal.get("leverage", 1) or 1,
+            "invo_position_size_pct": new_signal.get("position_size_pct", 0),
+            "invo_owner": new_signal.get("owner_username"),
+            "invo_portfolio_id": new_signal.get("portfolio_id"),
+            # Keep existing Binance-side position data (no sell/buy needed)
+            "binance_order_id": old_pos.get("binance_order_id"),
+            "binance_qty": old_pos.get("binance_qty", 0),
+            "binance_avg_price": old_pos.get("binance_avg_price", 0),
+            "binance_total_cost": old_pos.get("binance_total_cost", 0),
+            "stop_loss_order_id": old_pos.get("stop_loss_order_id"),
+            "stop_loss_price": old_pos.get("stop_loss_price", 0),
+            "status": old_pos.get("status"),
+            "intended_amount_usdt": old_pos.get("intended_amount_usdt", 0),
+        }
+
+        # Remove old position and record the new one
+        # (Use internal state ops to avoid double-counting stats)
+        if old_invo_id in self.state.state["open_positions"]:
+            del self.state.state["open_positions"][old_invo_id]
+        self.state.state["known_invo_ids"].add(new_invo_id)
+        self.state.state["open_positions"][new_invo_id] = {
+            **new_record,
+            "opened_at": old_pos.get("opened_at", datetime.now(timezone.utc).isoformat()),
+            "merged_from": old_invo_id,
+        }
+        self.state._save()
+
     def poll_portfolio(self, portfolio_config: dict):
         """Poll a single Invo portfolio for new/closed trades."""
         portfolio_id = portfolio_config["id"]
@@ -552,6 +605,8 @@ class InvoMirrorBot:
             return
 
         current_invo_ids = set()
+        # Track new positions opened this cycle so we can detect same-coin replacements
+        new_positions_this_cycle = {}  # invo_id -> parsed signal
 
         for inv in investments:
             parsed = self.invo.parse_investment(inv)
@@ -566,7 +621,7 @@ class InvoMirrorBot:
                     f"NEW SIGNAL from {portfolio_name}: "
                     f"{parsed['direction']} {parsed['ticker']} @ ${parsed['entry_price']}"
                 )
-                self._execute_buy(parsed)
+                new_positions_this_cycle[parsed["id"]] = parsed
             else:
                 # Check for position size changes on existing open positions
                 position = self.state.get_open_position(parsed["id"])
@@ -582,17 +637,44 @@ class InvoMirrorBot:
                         else:
                             self._execute_position_decrease(parsed["id"], position, old_pct, new_pct)
 
-        # Clean up skipped IDs for positions that are no longer active
-        self.state.clean_skipped(current_invo_ids)
-
-        # Check for closed positions
+        # Check for closed positions BEFORE opening new ones, so we can detect
+        # same-coin replacements (trader closed old trade, opened new one)
         normalized_portfolio_id = _normalize_id(portfolio_id)
+        closing_positions = []  # list of (invo_id, position)
         for invo_id, pos in list(self.state.get_open_positions().items()):
             if _normalize_id(pos.get("invo_portfolio_id")) != normalized_portfolio_id:
                 continue
             if invo_id not in current_invo_ids:
-                logger.info(f"CLOSE SIGNAL: {pos['ticker']} closed by {portfolio_name}")
-                self._execute_sell(invo_id, pos)
+                closing_positions.append((invo_id, pos))
+
+        # Build a map of new positions by their binance_symbol (only include
+        # signals that would actually be opened, not skipped SHORTs)
+        new_by_symbol = {}
+        for new_id, parsed in new_positions_this_cycle.items():
+            if config.LONG_ONLY and parsed.get("direction") != "LONG":
+                continue
+            symbol = BinanceClient.invo_ticker_to_binance(parsed["ticker"])
+            if symbol:
+                new_by_symbol[symbol] = (new_id, parsed)
+
+        # Process closes: merge if same coin is being re-opened, otherwise sell
+        for old_invo_id, old_pos in closing_positions:
+            binance_symbol = old_pos["binance_symbol"]
+            if binance_symbol in new_by_symbol:
+                new_id, new_parsed = new_by_symbol.pop(binance_symbol)
+                self._merge_replaced_position(old_invo_id, old_pos, new_id, new_parsed, portfolio_name)
+                # Remove from new_positions so we don't also execute a buy
+                new_positions_this_cycle.pop(new_id, None)
+            else:
+                logger.info(f"CLOSE SIGNAL: {old_pos['ticker']} closed by {portfolio_name}")
+                self._execute_sell(old_invo_id, old_pos)
+
+        # Now open genuinely new positions (excluding merged ones)
+        for new_id, parsed in new_positions_this_cycle.items():
+            self._execute_buy(parsed)
+
+        # Clean up skipped IDs for positions that are no longer active
+        self.state.clean_skipped(current_invo_ids)
 
     def print_status(self):
         """Print current bot status."""
